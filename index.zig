@@ -12,37 +12,55 @@ comptime {
     std.testing.refAllDecls(@This());
 }
 
-fn logError(name: []const u8) void {
-    var error_code = c.eglGetError();
-    const desc = switch (error_code) {
-        c.EGL_SUCCESS => unreachable,
-        c.EGL_NOT_INITIALIZED => "not initialized",
-        c.EGL_BAD_ACCESS => "bad access",
-        c.EGL_BAD_ALLOC => "bad alloc",
-        c.EGL_BAD_ATTRIBUTE => "bad attribute",
-        c.EGL_BAD_CONTEXT => "bad context",
-        c.EGL_BAD_CONFIG => "bad config",
-        c.EGL_BAD_CURRENT_SURFACE => "bad current surface",
-        c.EGL_BAD_DISPLAY => "bad display",
-        c.EGL_BAD_SURFACE => "bad surface",
-        c.EGL_BAD_MATCH => "bad match",
-        c.EGL_BAD_PARAMETER => "bad parameter",
-        c.EGL_BAD_NATIVE_PIXMAP => "bad native pixmap",
-        c.EGL_BAD_NATIVE_WINDOW => "bad native window",
-        c.EGL_CONTEXT_LOST => "context lost",
-        else => "unknown error",
-    };
+pub const EglError = error{
+    EglNotInitialized,
+    EglBadAccess,
+    OutOfMemory,
+    EglBadAttribute,
+    EglBadContext,
+    EglBadConfig,
+    EglBadCurrentSurface,
+    EglBadDisplay,
+    EglBadSurface,
+    EglBadMatch,
+    BadParameter,
+    EglBadNativePixmap,
+    EglBadNativeWindow,
+    EglContextLost,
+    EglUnknownError,
+};
 
-    std.log.scoped(.EGL).err("{s} generated error: {x} \"{s}\" ", .{ name, error_code, desc });
+fn getError() EglError {
+    const error_code = c.eglGetError();
+    return switch (error_code) {
+        c.EGL_SUCCESS => unreachable,
+        c.EGL_NOT_INITIALIZED => error.EglNotInitialized,
+        c.EGL_BAD_ACCESS => error.EglBadAccess,
+        c.EGL_BAD_ALLOC => error.OutOfMemory,
+        c.EGL_BAD_ATTRIBUTE => error.EglBadAttribute,
+        c.EGL_BAD_CONTEXT => error.EglBadContext,
+        c.EGL_BAD_CONFIG => error.EglBadConfig,
+        c.EGL_BAD_CURRENT_SURFACE => error.EglBadCurrentSurface,
+        c.EGL_BAD_DISPLAY => error.EglBadDisplay,
+        c.EGL_BAD_SURFACE => error.EglBadSurface,
+        c.EGL_BAD_MATCH => error.EglBadMatch,
+        c.EGL_BAD_PARAMETER => error.BadParameter,
+        c.EGL_BAD_NATIVE_PIXMAP => error.EglBadNativePixmap,
+        c.EGL_BAD_NATIVE_WINDOW => error.EglBadNativeWindow,
+        c.EGL_CONTEXT_LOST => error.EglContextLost,
+        else => error.EglUnknownError,
+    };
 }
 
 pub const NativeDisplay = ?*anyopaque;
 pub const NativeWindow = ?*anyopaque;
 
-pub fn getDisplay(native: NativeDisplay) ?*Display {
+pub fn getDisplay(native: NativeDisplay) EglError!*Display {
     const display = if (native) |ptr| c.eglGetDisplay(ptr) else c.eglGetDisplay(@intToPtr(NativeDisplay, c.EGL_DEFAULT_DISPLAY));
 
-    if (display == @intToPtr(?*anyopaque, c.EGL_NO_DISPLAY)) return null;
+    if (display == @intToPtr(?*anyopaque, c.EGL_NO_DISPLAY)) {
+        return getError();
+    }
 
     return @ptrCast(*Display, display);
 }
@@ -53,13 +71,10 @@ pub const Api = enum(c_uint) {
     openvg = c.EGL_OPENVG_API,
 };
 
-pub fn bindApi(api: Api) bool {
+pub fn bindApi(api: Api) EglError!void {
     if (c.eglBindAPI(@enumToInt(api)) != c.EGL_TRUE) {
-        logError("eglBindApi");
-        return false;
+        return getError();
     }
-
-    return true;
 }
 
 pub const Version = struct {
@@ -68,74 +83,65 @@ pub const Version = struct {
 };
 
 pub const Display = opaque {
-    pub fn initialize(display: *Display) ?Version {
+    pub fn initialize(display: *Display) EglError!Version {
         var version: Version = undefined;
         if (c.eglInitialize(display, &version.major, &version.minor) != c.EGL_TRUE) {
-            logError("eglInitialize");
-            return null;
+            return getError();
         }
 
         return version;
     }
 
-    pub fn createContext(display: *Display, config: *Config, attribs: Context.AttribList) ?*Context {
+    pub fn createContext(display: *Display, config: *Config, attribs: Context.AttribList) EglError!*Context {
         const context = c.eglCreateContext(display, config, @intToPtr(?*anyopaque, c.EGL_NO_CONTEXT), attribs.data.ptr);
 
         if (context == @intToPtr(?*anyopaque, c.EGL_NO_CONTEXT)) {
-            logError("eglCreateContext");
-            return null;
+            return getError();
         }
 
         return @ptrCast(*Context, context);
     }
 
-    pub fn makeCurrent(display: *Display, draw: *Surface, read: *Surface, context: *Context) bool {
+    pub fn makeCurrent(display: *Display, draw: *Surface, read: *Surface, context: *Context) EglError!void {
         if (c.eglMakeCurrent(display, draw, read, context) != c.EGL_TRUE) {
-            logError("eglMakeCurrent");
-            return false;
+            return getError();
         }
-
-        return true;
     }
 
-    pub fn swapBuffers(display: *Display, surface: *Surface) bool {
+    pub fn swapBuffers(display: *Display, surface: *Surface) EglError!void {
         if (c.eglSwapBuffers(display, surface) != c.EGL_TRUE) {
-            logError("eglSwapBuffers");
-            return false;
+            return getError();
         }
-
-        return true;
     }
 
-    pub fn chooseConfig(display: *Display, alloc: std.mem.Allocator, attribs: Config.AttribList) error{ OutOfMemory, EglFailure }![]const *Config {
+    pub fn chooseConfig(display: *Display, alloc: std.mem.Allocator, attribs: Config.AttribList) EglError![]const *Config {
         var num_config: c.EGLint = undefined;
         if (c.eglChooseConfig(display, attribs.data.ptr, null, 0, &num_config) != c.EGL_TRUE) {
-            logError("eglChooseConfig");
-            return error.EglFailure;
+            return getError();
         }
 
         var configs = try alloc.alloc(*Config, @intCast(usize, num_config));
         if (c.eglChooseConfig(display, attribs.data.ptr, @ptrCast([*c]?*anyopaque, configs.ptr), num_config, &num_config) != c.EGL_TRUE) {
-            logError("eglChooseConfig");
-            return error.EglFailure;
+            return getError();
         }
 
         return configs;
     }
 
-    pub fn createWindowSurface(display: *Display, config: *Config, window: NativeWindow, attribs: ?Surface.AttribList) ?*Surface {
+    pub fn createWindowSurface(display: *Display, config: *Config, window: NativeWindow, attribs: ?Surface.AttribList) EglError!*Surface {
         const surface = c.eglCreateWindowSurface(display, config, @ptrToInt(window), if (attribs) |list| list.data.ptr else null);
 
-        if (surface == @intToPtr(?*anyopaque, c.EGL_NO_SURFACE)) return null;
+        if (surface == @intToPtr(?*anyopaque, c.EGL_NO_SURFACE)) {
+            return getError();
+        }
 
         return @ptrCast(*Surface, surface);
     }
 
-    pub fn getConfigAttrib(display: *Display, config: *Config, comptime attrib: Config.Attrib) error{EglFailure}!Config.TypeOf(attrib) {
+    pub fn getConfigAttrib(display: *Display, config: *Config, comptime attrib: Config.Attrib) EglError!Config.TypeOf(attrib) {
         var raw_value: c.EGLint = undefined;
         if (c.eglGetConfigAttrib(display, config, @enumToInt(@as(Config.AttribList.Attrib, attrib)), &raw_value) != c.EGL_TRUE) {
-            logError();
-            return error.EglFailure;
+            return getError();
         }
 
         const ty = Config.TypeOf(attrib);
