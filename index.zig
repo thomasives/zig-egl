@@ -13,6 +13,7 @@ comptime {
 }
 
 pub const EglError = error{
+    EglSuccess,
     EglNotInitialized,
     EglBadAccess,
     OutOfMemory,
@@ -33,7 +34,7 @@ pub const EglError = error{
 fn getError() EglError {
     const error_code = c.eglGetError();
     return switch (error_code) {
-        c.EGL_SUCCESS => unreachable,
+        c.EGL_SUCCESS => error.EglSuccess,
         c.EGL_NOT_INITIALIZED => error.EglNotInitialized,
         c.EGL_BAD_ACCESS => error.EglBadAccess,
         c.EGL_BAD_ALLOC => error.OutOfMemory,
@@ -52,14 +53,36 @@ fn getError() EglError {
     };
 }
 
-pub const NativeDisplay = ?*anyopaque;
-pub const NativeWindow = ?*anyopaque;
+const DEFAULT_DISPLAY = @intToPtr(c.EGLNativeDisplayType, c.EGL_DEFAULT_DISPLAY);
+const NO_DISPLAY = @intToPtr(c.EGLDisplay, c.EGL_NO_DISPLAY);
+const NO_CONTEXT = @intToPtr(c.EGLContext, c.EGL_NO_CONTEXT);
+const NO_SURFACE = @intToPtr(c.EGLSurface, c.EGL_NO_SURFACE);
 
-pub fn getDisplay(native: NativeDisplay) EglError!*Display {
-    const display = if (native) |ptr| c.eglGetDisplay(ptr) else c.eglGetDisplay(@intToPtr(NativeDisplay, c.EGL_DEFAULT_DISPLAY));
+pub const StringName = enum(c.EGLint) {
+    client_apis = c.EGL_CLIENT_APIS,
+    extensions = c.EGL_EXTENSIONS,
+    vendor = c.EGL_VENDOR,
+    version = c.EGL_VERSION,
+};
 
-    if (display == @intToPtr(?*anyopaque, c.EGL_NO_DISPLAY)) {
+pub fn queryString(display: ?*Display, name: StringName) EglError![:0]const u8 {
+    const string = c.eglQueryString(display, @enumToInt(name));
+
+    if (string) |str| {
+        return std.mem.span(str);
+    } else {
         return getError();
+    }
+}
+
+pub fn getWaylandDisplay(native: ?*anyopaque) EglError!?*Display {
+    const display = c.eglGetPlatformDisplayEXT(c.EGL_PLATFORM_WAYLAND_EXT, native, null);
+
+    if (display == NO_DISPLAY) {
+        switch (getError()) {
+            error.EglSuccess => return null,
+            else => |e| return e,
+        }
     }
 
     return @ptrCast(*Display, display);
@@ -92,10 +115,16 @@ pub const Display = opaque {
         return version;
     }
 
+    pub fn terminate(display: *Display) EglError!void {
+        if (c.eglTerminate(display) != c.EGL_TRUE) {
+            return getError();
+        }
+    }
+
     pub fn createContext(display: *Display, config: *Config, attribs: Context.AttribList) EglError!*Context {
         const context = c.eglCreateContext(display, config, @intToPtr(?*anyopaque, c.EGL_NO_CONTEXT), attribs.data.ptr);
 
-        if (context == @intToPtr(?*anyopaque, c.EGL_NO_CONTEXT)) {
+        if (context == NO_CONTEXT) {
             return getError();
         }
 
@@ -128,10 +157,10 @@ pub const Display = opaque {
         return configs;
     }
 
-    pub fn createWindowSurface(display: *Display, config: *Config, window: NativeWindow, attribs: ?Surface.AttribList) EglError!*Surface {
-        const surface = c.eglCreateWindowSurface(display, config, @ptrToInt(window), if (attribs) |list| list.data.ptr else null);
+    pub fn createPlatformWindowSurface(display: *Display, config: *Config, window: ?*anyopaque, attribs: ?Surface.AttribList) EglError!*Surface {
+        const surface = c.eglCreatePlatformWindowSurfaceEXT(display, config, window, if (attribs) |list| list.data.ptr else null);
 
-        if (surface == @intToPtr(?*anyopaque, c.EGL_NO_SURFACE)) {
+        if (surface == NO_SURFACE) {
             return getError();
         }
 
@@ -336,8 +365,9 @@ const AttribDesc = struct {
 };
 
 fn AttributeList(comptime attrib_table: []const AttribDesc) type {
+    const IntType = c.EGLint;
     return struct {
-        data: []const c.EGLint,
+        data: []const IntType,
 
         pub fn make(comptime attribs: anytype) @This() {
             const type_info = @typeInfo(@TypeOf(attribs)).Struct;
@@ -353,7 +383,7 @@ fn AttributeList(comptime attrib_table: []const AttribDesc) type {
 
                 const raw_value = @as(attrib_desc.ty, @field(attribs, field.name));
                 const value = switch (@typeInfo(attrib_desc.ty)) {
-                    .Int => @intCast(c.EGLint, raw_value),
+                    .Int => @intCast(IntType, raw_value),
                     .Struct => raw_value.toInt(),
                     .Enum => @enumToInt(raw_value),
                     else => unreachable,
